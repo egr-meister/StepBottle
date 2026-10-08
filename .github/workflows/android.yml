@@ -1,0 +1,173 @@
+name: Android CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      minify:
+        description: "Enable R8 + resource shrinking (only after a verified non-minified release)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  BUILD_TOOLS: "36.0.0"
+  APP_ID: "com.egrmeister.stepbottle"
+  MINIFY: ${{ inputs.minify == true && 'true' || 'false' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      HAS_SIGNING: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Uses the Android SDK preinstalled on the GitHub runner (ANDROID_HOME).
+      - name: Install SDK Platform 36 and build tools
+        run: |
+          set -euo pipefail
+          SDKM="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin | sort -V | tail -1)/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" --install "platforms;android-36" "build-tools;${BUILD_TOOLS}" "platform-tools"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Verify Gradle wrapper
+        run: |
+          chmod +x gradlew
+          ./gradlew --version
+
+      - name: Unit tests and release lint
+        run: ./gradlew --no-daemon --stacktrace testDebugUnitTest lintRelease
+
+      - name: Upload test and lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            app/build/reports/
+            app/build/test-results/
+          if-no-files-found: ignore
+
+      - name: Fail when signing secrets are missing on main
+        if: env.HAS_SIGNING != 'true' && github.event_name != 'pull_request'
+        run: |
+          echo "::error::Release signing secrets are not configured (ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD)."
+          exit 1
+
+      - name: Decode release keystore
+        if: env.HAS_SIGNING == 'true'
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          umask 077
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/release.p12"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/release.p12" >> "$GITHUB_ENV"
+
+      - name: Build signed release APK and AAB
+        if: env.HAS_SIGNING == 'true'
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon --stacktrace assembleRelease bundleRelease -PstepbottleMinify=$MINIFY
+
+      - name: Verify signatures, permissions and native alignment
+        if: env.HAS_SIGNING == 'true'
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/$BUILD_TOOLS"
+          APK=app/build/outputs/apk/release/app-release.apk
+          AAB=app/build/outputs/bundle/release/app-release.aab
+          mkdir -p verification
+          test -f "$APK" && test -f "$AAB"
+
+          # Expected signer = certificate stored in the keystore.
+          EXPECTED=$(keytool -list -v -keystore "$ANDROID_KEYSTORE_PATH" -storetype PKCS12 \
+            -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" \
+            | awk -F': ' '/SHA256:/{print $2; exit}' | tr -d ':' | tr 'A-F' 'a-f')
+          echo "Expected signer SHA-256: $EXPECTED" | tee verification/expected-signer.txt
+
+          # APK: apksigner must verify; never accept the debug certificate.
+          "$BT/apksigner" verify --verbose --print-certs "$APK" | tee verification/apk-signature.txt
+          if grep -q "CN=Android Debug" verification/apk-signature.txt; then echo "APK is debug-signed"; exit 1; fi
+          APK_SHA=$(grep -m1 "certificate SHA-256 digest" verification/apk-signature.txt | awk -F': ' '{print $2}' | tr -d ' ')
+          [ "$APK_SHA" = "$EXPECTED" ] || { echo "APK signer mismatch: $APK_SHA"; exit 1; }
+
+          # AAB: JAR signature integrity and expected signer (a self-signed upload key is valid).
+          jarsigner -verify -verbose -certs "$AAB" > verification/aab-jarsigner.txt 2>&1 || { cat verification/aab-jarsigner.txt; exit 1; }
+          grep -q "jar verified." verification/aab-jarsigner.txt || { tail -50 verification/aab-jarsigner.txt; exit 1; }
+          if grep -q "CN=Android Debug" verification/aab-jarsigner.txt; then echo "AAB is debug-signed"; exit 1; fi
+          keytool -printcert -jarfile "$AAB" | tee verification/aab-cert.txt
+          AAB_SHA=$(awk -F': ' '/SHA256:/{print $2; exit}' verification/aab-cert.txt | tr -d ':' | tr 'A-F' 'a-f')
+          [ "$AAB_SHA" = "$EXPECTED" ] || { echo "AAB signer mismatch: $AAB_SHA"; exit 1; }
+
+          # Permission allowlist: packaged APK, AAB manifest and merged manifest.
+          python3 scripts/check_permissions.py apk "$BT/aapt2" "$APK" "$APP_ID" | tee verification/permissions.txt
+          python3 scripts/check_permissions.py aab "$AAB" "$APP_ID" | tee -a verification/permissions.txt
+          MERGED=$(find app/build/intermediates -path '*merged_manifest*release*' -name AndroidManifest.xml | head -1)
+          [ -n "$MERGED" ] || { echo "Merged release manifest not found"; exit 1; }
+          echo "Merged manifest: $MERGED" | tee -a verification/permissions.txt
+          python3 scripts/check_permissions.py manifest "$MERGED" "$APP_ID" | tee -a verification/permissions.txt
+
+          # 16 KB: native libraries and alignment (ELF LOAD segments + APK zip alignment).
+          python3 scripts/check_native_alignment.py "$APK" "$AAB" | tee verification/native-libs.txt
+          if unzip -l "$APK" | grep -q '\.so$'; then
+            "$BT/zipalign" -c -P 16 -v 4 "$APK" | tail -5 | tee -a verification/native-libs.txt
+          fi
+
+          ls -l "$APK" "$AAB" | tee verification/sizes.txt
+          {
+            echo "### StepBottle release (minify=$MINIFY)"
+            echo "- APK: $(du -h "$APK" | cut -f1) ($(stat -c%s "$APK") bytes)"
+            echo "- AAB: $(du -h "$AAB" | cut -f1) ($(stat -c%s "$AAB") bytes)"
+            echo "- Signer SHA-256: $EXPECTED"
+            echo '```'; cat verification/native-libs.txt; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload verified artifacts
+        if: env.HAS_SIGNING == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stepbottle-release${{ env.MINIFY == 'true' && '-minified' || '' }}
+          path: |
+            app/build/outputs/apk/release/app-release.apk
+            app/build/outputs/bundle/release/app-release.aab
+            app/build/outputs/mapping/release/mapping.txt
+            verification/
+          if-no-files-found: warn
+
+      - name: Remove temporary signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.p12"
+
+      # Runs last (also after a failure) so the generated schema is always visible in the log.
+      - name: Room schema is exported and committed
+        if: success() || failure()
+        run: |
+          set -euo pipefail
+          ls -R app/schemas || true
+          if [ -n "$(git status --porcelain -- app/schemas)" ]; then
+            echo "::error::app/schemas differs from the generated Room schema. Commit the generated file:"
+            git status --porcelain -- app/schemas
+            find app/schemas -name '*.json' -exec sh -c 'echo "----- $1"; cat "$1"' _ {} \;
+            exit 1
+          fi

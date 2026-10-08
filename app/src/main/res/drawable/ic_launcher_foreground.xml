@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Bottle with a small motion mark. Kept inside the 66 dp adaptive-icon safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:pathData="M54,33 L62,33 L62,37 C62,39 72,41 72,47 L72,75 C72,78 69,81 66,81 L50,81 C47,81 44,78 44,75 L44,47 C44,41 54,39 54,37 Z" android:fillColor="#FFFFFFFF" />
+    <group>
+        <clip-path android:pathData="M54,33 L62,33 L62,37 C62,39 72,41 72,47 L72,75 C72,78 69,81 66,81 L50,81 C47,81 44,78 44,75 L44,47 C44,41 54,39 54,37 Z" />
+        <path android:pathData="M40,58 L76,58 L76,85 L40,85 Z" android:fillColor="#FF7FA3C2" />
+    </group>
+    <path android:pathData="M54,33 L62,33 L62,37 C62,39 72,41 72,47 L72,75 C72,78 69,81 66,81 L50,81 C47,81 44,78 44,75 L44,47 C44,41 54,39 54,37 Z" android:fillColor="#00000000" android:strokeColor="#FF2D3A45" android:strokeWidth="3" android:strokeLineJoin="round" />
+    <path android:pathData="M52,25 L64,25 L64,33 L52,33 Z" android:fillColor="#FF2D3A45" />
+    <path android:pathData="M29,50 L38,50 M25,57 L38,57 M29,64 L38,64" android:fillColor="#00000000" android:strokeColor="#FF5F8A5A" android:strokeWidth="3.2" android:strokeLineCap="round" />
+</vector>
