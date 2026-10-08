@@ -81,7 +81,7 @@ Kotlin, Jetpack Compose, customised Material 3, Navigation Compose, ViewModel + 
 - `water_entries(id, amountMl, timestamp, loggedLocalDate, loggedLocalTime, zoneId, createdAt, updatedAt)`
 - `activity_entries(id, durationMinutes, category, label, timestamp, loggedLocalDate, loggedLocalTime, zoneId, createdAt, updatedAt)`
 - Both indexed by `(loggedLocalDate, loggedLocalTime)`.
-- Schemas are exported to `app/schemas/` (CI fails if the committed schema differs from the generated one). Future versions add explicit `Migration`s to `StepBottleDatabase.MIGRATIONS`; destructive migration is never enabled.
+- Schemas are exported to `app/schemas/` and committed; CI fails if the generated schema is missing from Git or differs from the committed one. Future versions add explicit `Migration`s to `StepBottleDatabase.MIGRATIONS`; destructive migration is never enabled.
 
 DataStore holds the shortcuts, reminder settings (enabled, time, schedule generation), last activity category, the “permission already asked” flag, the intro dismissal and the list filter.
 
@@ -171,11 +171,20 @@ GitHub → Settings → Secrets and variables → Actions:
 | `ANDROID_KEY_ALIAS` | key alias |
 | `ANDROID_KEY_PASSWORD` | key password |
 
-CI (`.github/workflows/android.yml`) uses the committed wrapper and JDK 17, runs unit tests and release lint, decodes the keystore to the runner's temp directory, builds the signed APK and AAB, runs `apksigner verify --print-certs` (fails on errors, on `CN=Android Debug` or on a signer that differs from the keystore certificate), verifies the AAB with `jarsigner -verify` and checks its signer, checks permissions and native alignment, uploads the verified artifacts and always deletes the temporary keystore. A self-signed upload certificate is accepted. No emulator test is required in CI. A manual run with `minify = true` repeats all checks for the R8 build and uploads the mapping file.
+CI (`.github/workflows/android.yml`) uses the committed wrapper and JDK 17, runs unit tests and release lint, decodes the keystore to the runner's temp directory, builds the signed APK and AAB, runs `apksigner verify --print-certs` (fails on errors, on `CN=Android Debug` or on a signer that differs from the keystore certificate), verifies the AAB with `jarsigner -verify` and checks its signer, checks permissions (APK via `aapt2`, AAB via `bundletool dump manifest`, plus the merged manifest) and native alignment, uploads the verified artifacts and always deletes the temporary keystore. A self-signed upload certificate is accepted. No emulator test is required in CI. A manual run with `minify = true` repeats all checks for the R8 build and uploads the mapping file.
 
 ## 16 KB page-size compatibility
 
-CI inspects the APK and AAB for native `.so` files (including transitive dependencies) and, if any exist, verifies ELF `LOAD` segment alignment ≥ 16 KB and APK zip alignment (`zipalign -c -P 16`). StepBottle uses no NDK code and its dependencies (AndroidX, Compose, Room with the framework SQLite driver, DataStore, coroutines) are pure JVM; the expected finding is **no native libraries**, which CI records in `verification/native-libs.txt` and in the run summary. Targeting API 36 alone is not treated as proof; if a future dependency adds native code, the alignment checks apply and a 16 KB device/emulator test is required before claiming runtime compatibility.
+StepBottle has no NDK code of its own, but two AndroidX dependencies ship native libraries, so the 16 KB checks apply:
+
+| Library | Comes from |
+|---|---|
+| `libandroidx.graphics.path.so` | `androidx.graphics:graphics-path` (Compose UI graphics) |
+| `libdatastore_shared_counter.so` | `androidx.datastore:datastore-core` 1.1.x |
+
+CI inspects the signed APK, the AAB and the universal APK that `bundletool` generates from the AAB. For every `.so` it checks that all ELF `LOAD` segments are aligned to at least 16 KB, and it runs `zipalign -c -P 16` on both APKs (AGP 8.12 stores native libraries uncompressed and page-aligned). Results are in `verification/native-libs.txt` and the run summary.
+
+These checks confirm that the packaging is correct. Runtime compatibility on a 16 KB device or emulator (for example the Android 15/16 16 KB system image) is still **pending** until it is actually tested; targeting API 36 alone does not prove it.
 
 ## Local install and logcat verification
 

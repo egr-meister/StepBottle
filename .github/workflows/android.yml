@@ -16,6 +16,7 @@ permissions:
 
 env:
   BUILD_TOOLS: "36.0.0"
+  BUNDLETOOL: "1.17.2"
   APP_ID: "com.egrmeister.stepbottle"
   MINIFY: ${{ inputs.minify == true && 'true' || 'false' }}
 
@@ -122,17 +123,30 @@ jobs:
 
           # Permission allowlist: packaged APK, AAB manifest and merged manifest.
           python3 scripts/check_permissions.py apk "$BT/aapt2" "$APK" "$APP_ID" | tee verification/permissions.txt
-          python3 scripts/check_permissions.py aab "$AAB" "$APP_ID" | tee -a verification/permissions.txt
+          # AAB: read the base manifest with bundletool (receiver android:permission attributes are not requests).
+          curl -fsSL -o "$RUNNER_TEMP/bundletool.jar" \
+            "https://github.com/google/bundletool/releases/download/${BUNDLETOOL}/bundletool-all-${BUNDLETOOL}.jar"
+          java -jar "$RUNNER_TEMP/bundletool.jar" dump manifest --bundle "$AAB" > verification/aab-manifest.xml
+          python3 scripts/check_permissions.py manifest verification/aab-manifest.xml "$APP_ID" | tee -a verification/permissions.txt
           MERGED=$(find app/build/intermediates -path '*merged_manifest*release*' -name AndroidManifest.xml | head -1)
           [ -n "$MERGED" ] || { echo "Merged release manifest not found"; exit 1; }
           echo "Merged manifest: $MERGED" | tee -a verification/permissions.txt
           python3 scripts/check_permissions.py manifest "$MERGED" "$APP_ID" | tee -a verification/permissions.txt
 
           # 16 KB: native libraries and alignment (ELF LOAD segments + APK zip alignment).
-          python3 scripts/check_native_alignment.py "$APK" "$AAB" | tee verification/native-libs.txt
-          if unzip -l "$APK" | grep -q '\.so$'; then
-            "$BT/zipalign" -c -P 16 -v 4 "$APK" | tail -5 | tee -a verification/native-libs.txt
-          fi
+          # Also inspect the universal APK that bundletool generates from the AAB (what devices receive).
+          java -jar "$RUNNER_TEMP/bundletool.jar" build-apks --bundle "$AAB" --output "$RUNNER_TEMP/from-aab.apks" --mode=universal
+          unzip -o -q "$RUNNER_TEMP/from-aab.apks" universal.apk -d "$RUNNER_TEMP/from-aab"
+          FROM_AAB="$RUNNER_TEMP/from-aab/universal.apk"
+          python3 scripts/check_native_alignment.py "$APK" "$AAB" "$FROM_AAB" | tee verification/native-libs.txt
+          for A in "$APK" "$FROM_AAB"; do
+            if unzip -l "$A" | grep -q '\.so$'; then
+              echo "zipalign -c -P 16 $(basename "$A"):" | tee -a verification/native-libs.txt
+              "$BT/zipalign" -c -P 16 -v 4 "$A" > "$RUNNER_TEMP/zipalign.txt" || { tail -20 "$RUNNER_TEMP/zipalign.txt"; exit 1; }
+              grep '\.so' "$RUNNER_TEMP/zipalign.txt" | tee -a verification/native-libs.txt
+              tail -1 "$RUNNER_TEMP/zipalign.txt" | tee -a verification/native-libs.txt
+            fi
+          done
 
           ls -l "$APK" "$AAB" | tee verification/sizes.txt
           {
@@ -164,10 +178,13 @@ jobs:
         if: success() || failure()
         run: |
           set -euo pipefail
-          ls -R app/schemas || true
-          if [ -n "$(git status --porcelain -- app/schemas)" ]; then
-            echo "::error::app/schemas differs from the generated Room schema. Commit the generated file:"
-            git status --porcelain -- app/schemas
-            find app/schemas -name '*.json' -exec sh -c 'echo "----- $1"; cat "$1"' _ {} \;
-            exit 1
-          fi
+          for f in $(find app/schemas -name '*.json' | sort); do
+            if ! git cat-file -e "HEAD:$f" 2>/dev/null; then
+              echo "::error::$f is generated but not committed:"; cat "$f"; exit 1
+            fi
+            # Compare content (the copy task rewrites the file; formatting/newlines are not significant).
+            git show "HEAD:$f" > "$RUNNER_TEMP/committed.json"
+            python3 -c "import json,sys; a,b=(json.load(open(p)) for p in sys.argv[1:]); sys.exit(0 if a==b else 1)" \
+              "$RUNNER_TEMP/committed.json" "$f" || { echo "::error::$f differs from the committed schema:"; cat "$f"; exit 1; }
+            echo "$f matches the committed schema"
+          done

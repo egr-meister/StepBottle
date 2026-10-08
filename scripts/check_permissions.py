@@ -3,14 +3,13 @@
 
 Usage:
   check_permissions.py apk <aapt2> <apk> <applicationId>
-  check_permissions.py aab <aab> <applicationId>
   check_permissions.py manifest <AndroidManifest.xml> <applicationId>
+(For an AAB, dump the base manifest with `bundletool dump manifest` and use the manifest mode.)
 """
 import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
-import zipfile
 
 ANDROID_NS = "{http://schemas.android.com/apk/res/android}"
 FORBIDDEN = {
@@ -43,14 +42,6 @@ def from_apk(aapt2, apk):
     return set(re.findall(r"uses-permission(?:-sdk-23)?: name='([^']+)'", out))
 
 
-def from_aab(aab):
-    # The bundle manifest is protobuf; permission names appear as plain strings.
-    with zipfile.ZipFile(aab) as z:
-        data = z.read("base/manifest/AndroidManifest.xml")
-    names = set(re.findall(rb"[A-Za-z0-9_.]+\.permission\.[A-Z0-9_]+", data))
-    return {n.decode() for n in names}
-
-
 def from_manifest(path):
     root = ET.parse(path).getroot()
     tags = ("uses-permission", "uses-permission-sdk-23")
@@ -60,15 +51,12 @@ def from_manifest(path):
 mode = sys.argv[1]
 if mode == "apk":
     requested, app_id = from_apk(sys.argv[2], sys.argv[3]), sys.argv[4]
-elif mode == "aab":
-    requested, app_id = from_aab(sys.argv[2]), sys.argv[3]
 elif mode == "manifest":
     requested, app_id = from_manifest(sys.argv[2]), sys.argv[3]
 else:
     sys.exit(f"unknown mode {mode}")
 
-# Permission *declarations* (<permission>) also appear in the AAB string scan; only judge requests there.
-unexpected = {p for p in requested - allowed(app_id) if not (mode == "aab" and p.endswith("DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"))}
+unexpected = requested - allowed(app_id)
 bad = requested & FORBIDDEN
 if unexpected or bad:
     print(f"[{mode}] Unexpected permissions:", sorted(unexpected | bad))

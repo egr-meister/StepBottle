@@ -9,14 +9,15 @@ Upload certificate (PKCS12 release key) SHA-256:
 
 | Check | Status | Notes |
 |---|---|---|
-| Focused unit tests (`testDebugUnitTest`) | ⏳ pending | First CI run |
-| Release lint (`lintRelease`) | ⏳ pending | |
-| Room schema exported and committed | ⏳ pending | `app/schemas/…/1.json` from the first CI build |
+| Focused unit tests (`testDebugUnitTest`) | ✅ CI run #1 | |
+| Release lint (`lintRelease`) | ✅ CI run #1 | |
+| Room schema exported and committed | ⏳ pending | `1.json` (identityHash `3f33ad28…`) taken from CI run #1, committed |
 | Signed non-minified APK + AAB | ⏳ pending | |
-| `apksigner verify --print-certs`, no `CN=Android Debug`, signer = release key | ⏳ pending | |
+| `apksigner verify --print-certs`, no `CN=Android Debug`, signer = release key | ✅ CI run #1 (APK) | v2 scheme, signer SHA-256 matches the keystore |
 | AAB `jarsigner -verify` + expected signer | ⏳ pending | |
 | Permission allowlist (APK, AAB, merged manifest) | ⏳ pending | Allowed: POST_NOTIFICATIONS, RECEIVE_BOOT_COMPLETED (+ AndroidX signature permission) |
-| Native `.so` inventory / 16 KB alignment | ⏳ pending | Expected: no native libraries |
+| Native `.so` inventory / 16 KB alignment | ⏳ pending | Run #1 found `libandroidx.graphics.path.so`, `libdatastore_shared_counter.so`; alignment check on APK, AAB and AAB-generated universal APK pending |
+| 16 KB runtime test (16 KB emulator/device) | ⏳ pending (device) | Required because native libraries are present |
 | Release artifact size | ⏳ pending | From the CI run summary |
 | R8 + resource shrinking run, checks repeated, mapping kept | ⏳ pending | Only after the non-minified release is verified |
 
